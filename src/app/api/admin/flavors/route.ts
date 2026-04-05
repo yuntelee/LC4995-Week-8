@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { TABLES } from "@/lib/config";
 import { requireAdmin } from "@/lib/server/admin-auth";
@@ -10,6 +9,10 @@ const createFlavorSchema = z.object({
   name: z.string().trim().min(1, "Flavor name is required."),
   description: z.string().trim().optional().nullable(),
 });
+
+const NAME_COLUMNS = ["name", "flavor_name", "title"] as const;
+const DESCRIPTION_COLUMNS = ["description", "details"] as const;
+const OWNER_COLUMNS = ["created_by", "user_id", "owner_id"] as const;
 
 function normalizeFlavorRow(row: Record<string, unknown>) {
   const id = String(row.id ?? row.flavor_id ?? "");
@@ -42,54 +45,65 @@ function normalizeFlavorRow(row: Record<string, unknown>) {
   };
 }
 
-async function getTableColumns(supabase: SupabaseClient, tableName: string) {
-  const { data, error } = await supabase
-    .schema("information_schema")
-    .from("columns")
-    .select("column_name")
-    .eq("table_schema", "public")
-    .eq("table_name", tableName);
-
-  if (error) {
-    return null;
-  }
-
-  const columns = new Set((data ?? []).map((row) => String(row.column_name)));
-  return columns;
-}
-
-function buildFlavorInsertPayload(args: {
+function buildFlavorInsertPayloads(args: {
   name: string;
   description: string | null;
   userId: string;
-  columns: Set<string> | null;
 }) {
-  const payload: Record<string, unknown> = {};
+  const payloads: Record<string, unknown>[] = [];
 
-  const nameColumn = args.columns
-    ? ["name", "flavor_name", "title"].find((column) => args.columns?.has(column))
-    : "name";
+  for (const nameColumn of NAME_COLUMNS) {
+    const base: Record<string, unknown> = {
+      [nameColumn]: args.name,
+    };
 
-  if (!nameColumn) {
-    return null;
+    payloads.push(base);
+
+    for (const descriptionColumn of DESCRIPTION_COLUMNS) {
+      payloads.push({
+        ...base,
+        [descriptionColumn]: args.description,
+      });
+    }
+
+    for (const ownerColumn of OWNER_COLUMNS) {
+      payloads.push({
+        ...base,
+        [ownerColumn]: args.userId,
+      });
+      payloads.push({
+        ...base,
+        [ownerColumn]: args.userId,
+        updated_by: args.userId,
+      });
+    }
+
+    for (const descriptionColumn of DESCRIPTION_COLUMNS) {
+      for (const ownerColumn of OWNER_COLUMNS) {
+        payloads.push({
+          ...base,
+          [descriptionColumn]: args.description,
+          [ownerColumn]: args.userId,
+        });
+        payloads.push({
+          ...base,
+          [descriptionColumn]: args.description,
+          [ownerColumn]: args.userId,
+          updated_by: args.userId,
+        });
+      }
+    }
   }
 
-  payload[nameColumn] = args.name;
-
-  const descriptionColumn = args.columns
-    ? ["description", "details"].find((column) => args.columns?.has(column))
-    : "description";
-
-  if (descriptionColumn) {
-    payload[descriptionColumn] = args.description;
-  }
-
-  if (args.columns?.has("created_by")) payload.created_by = args.userId;
-  if (args.columns?.has("updated_by")) payload.updated_by = args.userId;
-  if (args.columns?.has("user_id")) payload.user_id = args.userId;
-  if (args.columns?.has("owner_id")) payload.owner_id = args.userId;
-
-  return payload;
+  const seen = new Set<string>();
+  return payloads.filter((payload) => {
+    const key = JSON.stringify(payload);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 export async function GET(request: Request) {
@@ -129,31 +143,41 @@ export async function POST(request: Request) {
   }
 
   const { name, description } = parsed.data;
-  const columns = await getTableColumns(auth.supabase, TABLES.flavors);
-  const insertPayload = buildFlavorInsertPayload({
+  const insertPayloads = buildFlavorInsertPayloads({
     name,
     description: description || null,
     userId: auth.user.id,
-    columns,
   });
 
-  if (!insertPayload) {
+  let createdFlavor: Record<string, unknown> | null = null;
+  let lastErrorMessage = "Unable to create flavor with available column mappings.";
+
+  for (const payload of insertPayloads) {
+    const { data, error } = await auth.supabase
+      .from(TABLES.flavors)
+      .insert(payload)
+      .select("*")
+      .single();
+
+    if (!error && data) {
+      createdFlavor = data as Record<string, unknown>;
+      break;
+    }
+
+    if (error) {
+      const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
+      lastErrorMessage = details || error.message;
+    }
+  }
+
+  if (!createdFlavor) {
     return NextResponse.json(
-      { error: "Could not find a flavor name column (expected one of: name, flavor_name, title)." },
+      {
+        error: `Failed to create flavor: ${lastErrorMessage}`,
+      },
       { status: 500 },
     );
   }
 
-  const { data, error } = await auth.supabase
-    .from(TABLES.flavors)
-    .insert(insertPayload)
-    .select("*")
-    .single();
-
-  if (error) {
-    const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
-    return NextResponse.json({ error: `Failed to create flavor: ${details}` }, { status: 500 });
-  }
-
-  return NextResponse.json({ flavor: normalizeFlavorRow((data ?? {}) as Record<string, unknown>) }, { status: 201 });
+  return NextResponse.json({ flavor: normalizeFlavorRow(createdFlavor) }, { status: 201 });
 }

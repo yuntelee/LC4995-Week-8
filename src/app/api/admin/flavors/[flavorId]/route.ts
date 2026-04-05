@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { TABLES } from "@/lib/config";
 import { requireAdmin } from "@/lib/server/admin-auth";
@@ -10,6 +9,10 @@ const updateFlavorSchema = z.object({
   name: z.string().trim().min(1, "Flavor name is required."),
   description: z.string().trim().optional().nullable(),
 });
+
+const NAME_COLUMNS = ["name", "flavor_name", "title"] as const;
+const DESCRIPTION_COLUMNS = ["description", "details"] as const;
+const ID_COLUMNS = ["id", "flavor_id"] as const;
 
 function normalizeFlavorRow(row: Record<string, unknown>) {
   const id = String(row.id ?? row.flavor_id ?? "");
@@ -42,51 +45,43 @@ function normalizeFlavorRow(row: Record<string, unknown>) {
   };
 }
 
-async function getTableColumns(supabase: SupabaseClient, tableName: string) {
-  const { data, error } = await supabase
-    .schema("information_schema")
-    .from("columns")
-    .select("column_name")
-    .eq("table_schema", "public")
-    .eq("table_name", tableName);
-
-  if (error) {
-    return null;
-  }
-
-  const columns = new Set((data ?? []).map((row) => String(row.column_name)));
-  return columns;
-}
-
-function buildFlavorUpdatePayload(args: {
+function buildFlavorUpdatePayloads(args: {
   name: string;
   description: string | null;
   userId: string;
-  columns: Set<string> | null;
 }) {
-  const payload: Record<string, unknown> = {};
+  const payloads: Record<string, unknown>[] = [];
 
-  const nameColumn = args.columns
-    ? ["name", "flavor_name", "title"].find((column) => args.columns?.has(column))
-    : "name";
+  for (const nameColumn of NAME_COLUMNS) {
+    const base: Record<string, unknown> = {
+      [nameColumn]: args.name,
+    };
 
-  if (!nameColumn) {
-    return null;
+    payloads.push(base);
+    payloads.push({ ...base, updated_by: args.userId });
+
+    for (const descriptionColumn of DESCRIPTION_COLUMNS) {
+      payloads.push({
+        ...base,
+        [descriptionColumn]: args.description,
+      });
+      payloads.push({
+        ...base,
+        [descriptionColumn]: args.description,
+        updated_by: args.userId,
+      });
+    }
   }
 
-  payload[nameColumn] = args.name;
-
-  const descriptionColumn = args.columns
-    ? ["description", "details"].find((column) => args.columns?.has(column))
-    : "description";
-
-  if (descriptionColumn) {
-    payload[descriptionColumn] = args.description;
-  }
-
-  if (args.columns?.has("updated_by")) payload.updated_by = args.userId;
-
-  return payload;
+  const seen = new Set<string>();
+  return payloads.filter((payload) => {
+    const key = JSON.stringify(payload);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 type RouteContext = {
@@ -106,34 +101,45 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 
   const { name, description } = parsed.data;
-  const columns = await getTableColumns(auth.supabase, TABLES.flavors);
-  const updatePayload = buildFlavorUpdatePayload({
+  const updatePayloads = buildFlavorUpdatePayloads({
     name,
     description: description || null,
     userId: auth.user.id,
-    columns,
   });
 
-  if (!updatePayload) {
-    return NextResponse.json(
-      { error: "Could not find a flavor name column (expected one of: name, flavor_name, title)." },
-      { status: 500 },
-    );
+  let updatedFlavor: Record<string, unknown> | null = null;
+  let lastErrorMessage = "Unable to update flavor with available column mappings.";
+
+  for (const payload of updatePayloads) {
+    for (const idColumn of ID_COLUMNS) {
+      const { data, error } = await auth.supabase
+        .from(TABLES.flavors)
+        .update(payload)
+        .eq(idColumn, flavorId)
+        .select("*")
+        .maybeSingle();
+
+      if (!error && data) {
+        updatedFlavor = data as Record<string, unknown>;
+        break;
+      }
+
+      if (error) {
+        const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
+        lastErrorMessage = details || error.message;
+      }
+    }
+
+    if (updatedFlavor) {
+      break;
+    }
   }
 
-  const { data, error } = await auth.supabase
-    .from(TABLES.flavors)
-    .update(updatePayload)
-    .eq("id", flavorId)
-    .select("*")
-    .single();
-
-  if (error) {
-    const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
-    return NextResponse.json({ error: `Failed to update flavor: ${details}` }, { status: 500 });
+  if (!updatedFlavor) {
+    return NextResponse.json({ error: `Failed to update flavor: ${lastErrorMessage}` }, { status: 500 });
   }
 
-  return NextResponse.json({ flavor: normalizeFlavorRow((data ?? {}) as Record<string, unknown>) });
+  return NextResponse.json({ flavor: normalizeFlavorRow(updatedFlavor) });
 }
 
 export async function DELETE(request: Request, context: RouteContext) {
@@ -144,9 +150,22 @@ export async function DELETE(request: Request, context: RouteContext) {
 
   const { flavorId } = await context.params;
 
-  const { error } = await auth.supabase.from(TABLES.flavors).delete().eq("id", flavorId);
-  if (error) {
-    return NextResponse.json({ error: `Failed to delete flavor: ${error.message}` }, { status: 500 });
+  let deleted = false;
+  let lastErrorMessage = "Unable to delete flavor.";
+
+  for (const idColumn of ID_COLUMNS) {
+    const { error } = await auth.supabase.from(TABLES.flavors).delete().eq(idColumn, flavorId);
+    if (!error) {
+      deleted = true;
+      break;
+    }
+
+    const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
+    lastErrorMessage = details || error.message;
+  }
+
+  if (!deleted) {
+    return NextResponse.json({ error: `Failed to delete flavor: ${lastErrorMessage}` }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true });

@@ -1,0 +1,133 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #f3f4f6;
+  --bg-soft: #e5e7eb;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --text: #111827;
+  --text-muted: #4b5563;
+  --line: #d1d5db;
+  --brand: #0f766e;
+  --brand-contrast: #f0fdfa;
+}
+
+:root[data-theme="light"] {
+  --bg: #f3f4f6;
+  --bg-soft: #e5e7eb;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --text: #111827;
+  --text-muted: #4b5563;
+  --line: #d1d5db;
+  --brand: #0f766e;
+  --brand-contrast: #f0fdfa;
+}
+
+:root[data-theme="dark"] {
+  --bg: #030712;
+  --bg-soft: #0f172a;
+  --surface: #111827;
+  --surface-muted: #1f2937;
+  --text: #f9fafb;
+  --text-muted: #d1d5db;
+  --line: #374151;
+  --brand: #14b8a6;
+  --brand-contrast: #062421;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --bg: #030712;
+    --bg-soft: #0f172a;
+    --surface: #111827;
+    --surface-muted: #1f2937;
+    --text: #f9fafb;
+    --text-muted: #d1d5db;
+    --line: #374151;
+    --brand: #14b8a6;
+    --brand-contrast: #062421;
+  }
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    --bg: #f3f4f6;
+    --bg-soft: #e5e7eb;
+    --surface: #ffffff;
+    --surface-muted: #f8fafc;
+    --text: #111827;
+    --text-muted: #4b5563;
+    --line: #d1d5db;
+    --brand: #0f766e;
+    --brand-contrast: #f0fdfa;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: radial-gradient(circle at 20% 20%, color-mix(in srgb, var(--brand) 18%, transparent), transparent 35%),
+    radial-gradient(circle at 80% 0%, color-mix(in srgb, var(--bg-soft) 85%, transparent), transparent 30%),
+    var(--bg);
+  color: var(--text);
+  font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.app-card {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 12px;
+}
+
+.input {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--surface-muted);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+}
+
+.btn {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.45rem 0.7rem;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: var(--surface-muted);
+}
+
+.btn-primary {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--brand-contrast);
+}
+
+.btn-danger {
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.subtle {
+  color: var(--text-muted);
+}

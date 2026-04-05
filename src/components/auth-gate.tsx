@@ -11,28 +11,30 @@ type Props = {
 
 type GateStatus = "checking" | "signed-out" | "denied" | "allowed" | "error";
 
-function SignInCard({ onSignedIn }: { onSignedIn: () => void }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+function SignInCard() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  async function signIn(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
+  async function signInWithGoogle() {
     setLoading(true);
     setMessage(null);
 
     try {
       const supabase = getBrowserSupabaseClient();
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      const redirectTo = window.location.origin;
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo,
+        },
+      });
+
       if (error) {
         setMessage(error.message);
         return;
       }
-
-      onSignedIn();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Sign in failed.");
+      setMessage(error instanceof Error ? error.message : "Google sign in failed.");
     } finally {
       setLoading(false);
     }
@@ -41,34 +43,10 @@ function SignInCard({ onSignedIn }: { onSignedIn: () => void }) {
   return (
     <section className="app-card mx-auto max-w-md p-5 md:p-6">
       <h2 className="text-lg font-semibold">Admin sign in</h2>
-      <p className="subtle mt-2 text-sm">Only superadmins or matrix admins can access this tool.</p>
-      <form className="mt-4 space-y-3" onSubmit={signIn}>
-        <label className="block text-sm">
-          Email
-          <input
-            className="input mt-1"
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            required
-          />
-        </label>
-
-        <label className="block text-sm">
-          Password
-          <input
-            className="input mt-1"
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-          />
-        </label>
-
-        <button className="btn btn-primary w-full" type="submit" disabled={loading}>
-          {loading ? "Signing in..." : "Sign in"}
-        </button>
-      </form>
+      <p className="subtle mt-2 text-sm">Use Google to sign in. Access still requires admin profile roles.</p>
+      <button className="btn btn-primary mt-4 w-full" type="button" onClick={() => void signInWithGoogle()} disabled={loading}>
+        {loading ? "Redirecting to Google..." : "Continue with Google"}
+      </button>
       {message ? <p className="mt-3 text-sm text-red-500">{message}</p> : null}
     </section>
   );
@@ -173,7 +151,7 @@ export function AuthGate({ children }: Props) {
   }
 
   if (status === "signed-out") {
-    return <SignInCard onSignedIn={() => setStatus("checking")} />;
+    return <SignInCard />;
   }
 
   if (status === "denied") {

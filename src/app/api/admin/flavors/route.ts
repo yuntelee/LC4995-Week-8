@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { TABLES } from "@/lib/config";
 import { requireAdmin } from "@/lib/server/admin-auth";
@@ -10,12 +11,35 @@ const createFlavorSchema = z.object({
   description: z.string().trim().optional().nullable(),
 });
 
-const NAME_COLUMNS = ["name", "flavor_name", "title"] as const;
-const DESCRIPTION_COLUMNS = ["description", "details"] as const;
-const OWNER_COLUMNS = ["created_by", "user_id", "owner_id"] as const;
+const NAME_COLUMNS = [
+  "name",
+  "flavor_name",
+  "title",
+  "flavor",
+  "humor_flavor",
+  "humor_flavor_name",
+  "label",
+] as const;
+const DESCRIPTION_COLUMNS = ["description", "details", "flavor_description", "summary"] as const;
+const OWNER_COLUMNS = [
+  "created_by",
+  "user_id",
+  "owner_id",
+  "profile_id",
+  "admin_id",
+  "created_by_user_id",
+] as const;
+const TIMESTAMP_COLUMNS = ["created_at", "updated_at"] as const;
+
+type FlavorColumnHints = {
+  nameColumn: string | null;
+  descriptionColumn: string | null;
+  ownerColumns: string[];
+  timestampColumns: string[];
+};
 
 function normalizeFlavorRow(row: Record<string, unknown>) {
-  const id = String(row.id ?? row.flavor_id ?? "");
+  const id = String(row.id ?? row.flavor_id ?? row.humor_flavor_id ?? "");
   const name =
     (typeof row.name === "string" && row.name) ||
     (typeof row.flavor_name === "string" && row.flavor_name) ||
@@ -45,14 +69,48 @@ function normalizeFlavorRow(row: Record<string, unknown>) {
   };
 }
 
+function inferFlavorColumnHintsFromRow(row: Record<string, unknown>): FlavorColumnHints {
+  const keys = new Set(Object.keys(row));
+
+  return {
+    nameColumn: NAME_COLUMNS.find((column) => keys.has(column)) ?? null,
+    descriptionColumn: DESCRIPTION_COLUMNS.find((column) => keys.has(column)) ?? null,
+    ownerColumns: OWNER_COLUMNS.filter((column) => keys.has(column)),
+    timestampColumns: TIMESTAMP_COLUMNS.filter((column) => keys.has(column)),
+  };
+}
+
+async function inferFlavorColumnHints(supabase: SupabaseClient) {
+  const { data, error } = await supabase.from(TABLES.flavors).select("*").limit(1);
+  if (error || !data || data.length === 0) {
+    return null;
+  }
+
+  return inferFlavorColumnHintsFromRow((data[0] ?? {}) as Record<string, unknown>);
+}
+
 function buildFlavorInsertPayloads(args: {
   name: string;
   description: string | null;
   userId: string;
+  hints: FlavorColumnHints | null;
 }) {
   const payloads: Record<string, unknown>[] = [];
+  const nowIso = new Date().toISOString();
 
-  for (const nameColumn of NAME_COLUMNS) {
+  const candidateNameColumns = args.hints?.nameColumn
+    ? [args.hints.nameColumn, ...NAME_COLUMNS.filter((column) => column !== args.hints?.nameColumn)]
+    : [...NAME_COLUMNS];
+
+  const candidateDescriptionColumns = args.hints?.descriptionColumn
+    ? [args.hints.descriptionColumn, ...DESCRIPTION_COLUMNS.filter((column) => column !== args.hints?.descriptionColumn)]
+    : [...DESCRIPTION_COLUMNS];
+
+  const candidateOwnerColumns = args.hints?.ownerColumns.length ? args.hints.ownerColumns : [...OWNER_COLUMNS];
+  const includeCreatedAt = Boolean(args.hints?.timestampColumns.includes("created_at"));
+  const includeUpdatedAt = Boolean(args.hints?.timestampColumns.includes("updated_at"));
+
+  for (const nameColumn of candidateNameColumns) {
     const base: Record<string, unknown> = {
       [nameColumn]: args.name,
     };
@@ -61,7 +119,7 @@ function buildFlavorInsertPayloads(args: {
     payloads.push(base);
 
     // Then try likely ownership columns for schemas with NOT NULL ownership constraints.
-    for (const ownerColumn of OWNER_COLUMNS) {
+    for (const ownerColumn of candidateOwnerColumns) {
       payloads.push({
         ...base,
         [ownerColumn]: args.userId,
@@ -74,15 +132,15 @@ function buildFlavorInsertPayloads(args: {
     }
 
     // Description variants are optional and tested after safer combinations.
-    for (const descriptionColumn of DESCRIPTION_COLUMNS) {
+    for (const descriptionColumn of candidateDescriptionColumns) {
       payloads.push({
         ...base,
         [descriptionColumn]: args.description,
       });
     }
 
-    for (const descriptionColumn of DESCRIPTION_COLUMNS) {
-      for (const ownerColumn of OWNER_COLUMNS) {
+    for (const descriptionColumn of candidateDescriptionColumns) {
+      for (const ownerColumn of candidateOwnerColumns) {
         payloads.push({
           ...base,
           [descriptionColumn]: args.description,
@@ -96,6 +154,19 @@ function buildFlavorInsertPayloads(args: {
         });
       }
     }
+  }
+
+  if (includeCreatedAt || includeUpdatedAt) {
+    const withTimestamps: Record<string, unknown>[] = [];
+    for (const payload of payloads) {
+      withTimestamps.push(payload);
+      withTimestamps.push({
+        ...payload,
+        ...(includeCreatedAt ? { created_at: nowIso } : {}),
+        ...(includeUpdatedAt ? { updated_at: nowIso } : {}),
+      });
+    }
+    payloads.splice(0, payloads.length, ...withTimestamps);
   }
 
   const seen = new Set<string>();
@@ -146,10 +217,12 @@ export async function POST(request: Request) {
   }
 
   const { name, description } = parsed.data;
+  const hints = await inferFlavorColumnHints(auth.supabase);
   const insertPayloads = buildFlavorInsertPayloads({
     name,
     description: description || null,
     userId: auth.user.id,
+    hints,
   });
 
   let createdFlavor: Record<string, unknown> | null = null;

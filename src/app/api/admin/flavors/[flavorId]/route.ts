@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { TABLES } from "@/lib/config";
 import { requireAdmin } from "@/lib/server/admin-auth";
@@ -10,12 +11,25 @@ const updateFlavorSchema = z.object({
   description: z.string().trim().optional().nullable(),
 });
 
-const NAME_COLUMNS = ["name", "flavor_name", "title"] as const;
-const DESCRIPTION_COLUMNS = ["description", "details"] as const;
-const ID_COLUMNS = ["id", "flavor_id"] as const;
+const NAME_COLUMNS = [
+  "name",
+  "flavor_name",
+  "title",
+  "flavor",
+  "humor_flavor",
+  "humor_flavor_name",
+  "label",
+] as const;
+const DESCRIPTION_COLUMNS = ["description", "details", "flavor_description", "summary"] as const;
+const ID_COLUMNS = ["id", "flavor_id", "humor_flavor_id"] as const;
+
+type FlavorColumnHints = {
+  nameColumn: string | null;
+  descriptionColumn: string | null;
+};
 
 function normalizeFlavorRow(row: Record<string, unknown>) {
-  const id = String(row.id ?? row.flavor_id ?? "");
+  const id = String(row.id ?? row.flavor_id ?? row.humor_flavor_id ?? "");
   const name =
     (typeof row.name === "string" && row.name) ||
     (typeof row.flavor_name === "string" && row.flavor_name) ||
@@ -45,14 +59,53 @@ function normalizeFlavorRow(row: Record<string, unknown>) {
   };
 }
 
+function inferFlavorColumnHintsFromRow(row: Record<string, unknown>): FlavorColumnHints {
+  const keys = new Set(Object.keys(row));
+  return {
+    nameColumn: NAME_COLUMNS.find((column) => keys.has(column)) ?? null,
+    descriptionColumn: DESCRIPTION_COLUMNS.find((column) => keys.has(column)) ?? null,
+  };
+}
+
+async function loadFlavorById(
+  supabase: SupabaseClient,
+  flavorId: string,
+) {
+  for (const idColumn of ID_COLUMNS) {
+    const { data, error } = await supabase
+      .from(TABLES.flavors)
+      .select("*")
+      .eq(idColumn, flavorId)
+      .maybeSingle();
+
+    if (!error && data) {
+      return {
+        row: data as Record<string, unknown>,
+        idColumn,
+      };
+    }
+  }
+
+  return null;
+}
+
 function buildFlavorUpdatePayloads(args: {
   name: string;
   description: string | null;
   userId: string;
+  hints: FlavorColumnHints | null;
 }) {
   const payloads: Record<string, unknown>[] = [];
 
-  for (const nameColumn of NAME_COLUMNS) {
+  const candidateNameColumns = args.hints?.nameColumn
+    ? [args.hints.nameColumn, ...NAME_COLUMNS.filter((column) => column !== args.hints?.nameColumn)]
+    : [...NAME_COLUMNS];
+
+  const candidateDescriptionColumns = args.hints?.descriptionColumn
+    ? [args.hints.descriptionColumn, ...DESCRIPTION_COLUMNS.filter((column) => column !== args.hints?.descriptionColumn)]
+    : [...DESCRIPTION_COLUMNS];
+
+  for (const nameColumn of candidateNameColumns) {
     const base: Record<string, unknown> = {
       [nameColumn]: args.name,
     };
@@ -60,7 +113,7 @@ function buildFlavorUpdatePayloads(args: {
     payloads.push(base);
     payloads.push({ ...base, updated_by: args.userId });
 
-    for (const descriptionColumn of DESCRIPTION_COLUMNS) {
+    for (const descriptionColumn of candidateDescriptionColumns) {
       payloads.push({
         ...base,
         [descriptionColumn]: args.description,
@@ -101,10 +154,15 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 
   const { name, description } = parsed.data;
+  const loaded = await loadFlavorById(auth.supabase, flavorId);
+  const hints = loaded ? inferFlavorColumnHintsFromRow(loaded.row) : null;
+  const idColumns = loaded ? [loaded.idColumn, ...ID_COLUMNS.filter((column) => column !== loaded.idColumn)] : [...ID_COLUMNS];
+
   const updatePayloads = buildFlavorUpdatePayloads({
     name,
     description: description || null,
     userId: auth.user.id,
+    hints,
   });
 
   let updatedFlavor: Record<string, unknown> | null = null;
@@ -126,7 +184,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       continue;
     }
 
-    for (const idColumn of ID_COLUMNS) {
+    for (const idColumn of idColumns) {
       const { data, error } = await auth.supabase
         .from(TABLES.flavors)
         .update(payload)
@@ -165,11 +223,13 @@ export async function DELETE(request: Request, context: RouteContext) {
   }
 
   const { flavorId } = await context.params;
+  const loaded = await loadFlavorById(auth.supabase, flavorId);
+  const idColumns = loaded ? [loaded.idColumn, ...ID_COLUMNS.filter((column) => column !== loaded.idColumn)] : [...ID_COLUMNS];
 
   let deleted = false;
   let lastErrorMessage = "Unable to delete flavor.";
 
-  for (const idColumn of ID_COLUMNS) {
+  for (const idColumn of idColumns) {
     const { error } = await auth.supabase.from(TABLES.flavors).delete().eq(idColumn, flavorId);
     if (!error) {
       deleted = true;

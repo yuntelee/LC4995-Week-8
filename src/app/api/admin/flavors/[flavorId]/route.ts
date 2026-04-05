@@ -11,26 +11,21 @@ const updateFlavorSchema = z.object({
   description: z.string().trim().optional().nullable(),
 });
 
-const NAME_COLUMNS = [
-  "name",
-  "flavor_name",
-  "title",
-  "flavor",
-  "humor_flavor",
-  "humor_flavor_name",
-  "label",
-] as const;
+const NAME_COLUMNS = ["slug", "name", "flavor_name", "title", "flavor", "humor_flavor", "humor_flavor_name", "label"] as const;
 const DESCRIPTION_COLUMNS = ["description", "details", "flavor_description", "summary"] as const;
 const ID_COLUMNS = ["id", "flavor_id", "humor_flavor_id"] as const;
 
 type FlavorColumnHints = {
   nameColumn: string | null;
   descriptionColumn: string | null;
+  modifiedByUserIdColumn: string | null;
+  modifiedDatetimeUtcColumn: string | null;
 };
 
 function normalizeFlavorRow(row: Record<string, unknown>) {
   const id = String(row.id ?? row.flavor_id ?? row.humor_flavor_id ?? "");
   const name =
+    (typeof row.slug === "string" && row.slug) ||
     (typeof row.name === "string" && row.name) ||
     (typeof row.flavor_name === "string" && row.flavor_name) ||
     (typeof row.title === "string" && row.title) ||
@@ -42,10 +37,12 @@ function normalizeFlavorRow(row: Record<string, unknown>) {
         ? row.details
         : null;
   const createdAt =
+    (typeof row.created_datetime_utc === "string" && row.created_datetime_utc) ||
     (typeof row.created_at === "string" && row.created_at) ||
     (typeof row.createdAt === "string" && row.createdAt) ||
     new Date(0).toISOString();
   const updatedAt =
+    (typeof row.modified_datetime_utc === "string" && row.modified_datetime_utc) ||
     (typeof row.updated_at === "string" && row.updated_at) ||
     (typeof row.updatedAt === "string" && row.updatedAt) ||
     createdAt;
@@ -59,82 +56,93 @@ function normalizeFlavorRow(row: Record<string, unknown>) {
   };
 }
 
-function inferFlavorColumnHintsFromRow(row: Record<string, unknown>): FlavorColumnHints {
-  const keys = new Set(Object.keys(row));
-  return {
-    nameColumn: NAME_COLUMNS.find((column) => keys.has(column)) ?? null,
-    descriptionColumn: DESCRIPTION_COLUMNS.find((column) => keys.has(column)) ?? null,
-  };
+function slugifyFlavorName(name: string) {
+  const slug = name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return slug || "flavor";
 }
 
-async function loadFlavorById(
-  supabase: SupabaseClient,
-  flavorId: string,
-) {
-  for (const idColumn of ID_COLUMNS) {
-    const { data, error } = await supabase
-      .from(TABLES.flavors)
-      .select("*")
-      .eq(idColumn, flavorId)
-      .maybeSingle();
+async function columnExists(supabase: SupabaseClient, table: string, column: string) {
+  const { error } = await supabase.from(table).select(column).limit(1);
+  return !error;
+}
 
-    if (!error && data) {
-      return {
-        row: data as Record<string, unknown>,
-        idColumn,
-      };
+async function findFirstExistingColumn(
+  supabase: SupabaseClient,
+  table: string,
+  candidates: readonly string[],
+) {
+  for (const candidate of candidates) {
+    if (await columnExists(supabase, table, candidate)) {
+      return candidate;
     }
   }
-
   return null;
 }
 
-function buildFlavorUpdatePayloads(args: {
+async function findExistingColumns(
+  supabase: SupabaseClient,
+  table: string,
+  candidates: readonly string[],
+) {
+  const existing: string[] = [];
+  for (const candidate of candidates) {
+    if (await columnExists(supabase, table, candidate)) {
+      existing.push(candidate);
+    }
+  }
+  return existing;
+}
+
+async function inferFlavorColumnHints(supabase: SupabaseClient): Promise<FlavorColumnHints> {
+  const nameColumn = await findFirstExistingColumn(supabase, TABLES.flavors, NAME_COLUMNS);
+  const descriptionColumn = await findFirstExistingColumn(supabase, TABLES.flavors, DESCRIPTION_COLUMNS);
+  const modifiedByUserIdColumn = (await columnExists(supabase, TABLES.flavors, "modified_by_user_id"))
+    ? "modified_by_user_id"
+    : null;
+  const modifiedDatetimeUtcColumn = (await columnExists(supabase, TABLES.flavors, "modified_datetime_utc"))
+    ? "modified_datetime_utc"
+    : null;
+
+  return {
+    nameColumn,
+    descriptionColumn,
+    modifiedByUserIdColumn,
+    modifiedDatetimeUtcColumn,
+  };
+}
+
+function buildFlavorUpdatePayload(args: {
   name: string;
   description: string | null;
   userId: string;
-  hints: FlavorColumnHints | null;
+  hints: FlavorColumnHints;
 }) {
-  const payloads: Record<string, unknown>[] = [];
-
-  const candidateNameColumns = args.hints?.nameColumn
-    ? [args.hints.nameColumn, ...NAME_COLUMNS.filter((column) => column !== args.hints?.nameColumn)]
-    : [...NAME_COLUMNS];
-
-  const candidateDescriptionColumns = args.hints?.descriptionColumn
-    ? [args.hints.descriptionColumn, ...DESCRIPTION_COLUMNS.filter((column) => column !== args.hints?.descriptionColumn)]
-    : [...DESCRIPTION_COLUMNS];
-
-  for (const nameColumn of candidateNameColumns) {
-    const base: Record<string, unknown> = {
-      [nameColumn]: args.name,
-    };
-
-    payloads.push(base);
-    payloads.push({ ...base, updated_by: args.userId });
-
-    for (const descriptionColumn of candidateDescriptionColumns) {
-      payloads.push({
-        ...base,
-        [descriptionColumn]: args.description,
-      });
-      payloads.push({
-        ...base,
-        [descriptionColumn]: args.description,
-        updated_by: args.userId,
-      });
-    }
+  if (!args.hints.nameColumn) {
+    return null;
   }
 
-  const seen = new Set<string>();
-  return payloads.filter((payload) => {
-    const key = JSON.stringify(payload);
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
+  const payload: Record<string, unknown> = {
+    [args.hints.nameColumn]: args.hints.nameColumn === "slug" ? slugifyFlavorName(args.name) : args.name,
+  };
+
+  if (args.hints.descriptionColumn) {
+    payload[args.hints.descriptionColumn] = args.description;
+  }
+
+  if (args.hints.modifiedByUserIdColumn) {
+    payload[args.hints.modifiedByUserIdColumn] = args.userId;
+  }
+
+  if (args.hints.modifiedDatetimeUtcColumn) {
+    payload[args.hints.modifiedDatetimeUtcColumn] = new Date().toISOString();
+  }
+
+  return payload;
 }
 
 type RouteContext = {
@@ -154,58 +162,55 @@ export async function PATCH(request: Request, context: RouteContext) {
   }
 
   const { name, description } = parsed.data;
-  const loaded = await loadFlavorById(auth.supabase, flavorId);
-  const hints = loaded ? inferFlavorColumnHintsFromRow(loaded.row) : null;
-  const idColumns = loaded ? [loaded.idColumn, ...ID_COLUMNS.filter((column) => column !== loaded.idColumn)] : [...ID_COLUMNS];
+  const hints = await inferFlavorColumnHints(auth.supabase);
+  if (!hints.nameColumn) {
+    return NextResponse.json(
+      {
+        error:
+          "Failed to update flavor: no supported flavor name column found. Expected one of: slug, name, flavor_name, title, flavor, humor_flavor, humor_flavor_name, label.",
+      },
+      { status: 500 },
+    );
+  }
 
-  const updatePayloads = buildFlavorUpdatePayloads({
+  const idColumns = await findExistingColumns(auth.supabase, TABLES.flavors, ID_COLUMNS);
+  if (!idColumns.length) {
+    return NextResponse.json(
+      { error: "Failed to update flavor: no supported flavor id column found." },
+      { status: 500 },
+    );
+  }
+
+  const updatePayload = buildFlavorUpdatePayload({
     name,
     description: description || null,
     userId: auth.user.id,
     hints,
   });
 
+  if (!updatePayload) {
+    return NextResponse.json({ error: "Failed to build update payload for flavor." }, { status: 500 });
+  }
+
   let updatedFlavor: Record<string, unknown> | null = null;
-  let lastErrorMessage = "Unable to update flavor with available column mappings.";
-  const missingColumns = new Set<string>();
+  let lastErrorMessage = "Unable to update flavor.";
 
-  const payloadHasMissingColumn = (payload: Record<string, unknown>) =>
-    Object.keys(payload).some((key) => missingColumns.has(key));
+  for (const idColumn of idColumns) {
+    const { data, error } = await auth.supabase
+      .from(TABLES.flavors)
+      .update(updatePayload)
+      .eq(idColumn, flavorId)
+      .select("*")
+      .maybeSingle();
 
-  const rememberMissingColumn = (message: string) => {
-    const match = message.match(/Could not find the '([^']+)' column/i);
-    if (match?.[1]) {
-      missingColumns.add(match[1]);
-    }
-  };
-
-  for (const payload of updatePayloads) {
-    if (payloadHasMissingColumn(payload)) {
-      continue;
-    }
-
-    for (const idColumn of idColumns) {
-      const { data, error } = await auth.supabase
-        .from(TABLES.flavors)
-        .update(payload)
-        .eq(idColumn, flavorId)
-        .select("*")
-        .maybeSingle();
-
-      if (!error && data) {
-        updatedFlavor = data as Record<string, unknown>;
-        break;
-      }
-
-      if (error) {
-        const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
-        lastErrorMessage = details || error.message;
-        rememberMissingColumn(lastErrorMessage);
-      }
-    }
-
-    if (updatedFlavor) {
+    if (!error && data) {
+      updatedFlavor = data as Record<string, unknown>;
       break;
+    }
+
+    if (error) {
+      const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
+      lastErrorMessage = details || error.message;
     }
   }
 
@@ -223,8 +228,13 @@ export async function DELETE(request: Request, context: RouteContext) {
   }
 
   const { flavorId } = await context.params;
-  const loaded = await loadFlavorById(auth.supabase, flavorId);
-  const idColumns = loaded ? [loaded.idColumn, ...ID_COLUMNS.filter((column) => column !== loaded.idColumn)] : [...ID_COLUMNS];
+  const idColumns = await findExistingColumns(auth.supabase, TABLES.flavors, ID_COLUMNS);
+  if (!idColumns.length) {
+    return NextResponse.json(
+      { error: "Failed to delete flavor: no supported flavor id column found." },
+      { status: 500 },
+    );
+  }
 
   let deleted = false;
   let lastErrorMessage = "Unable to delete flavor.";

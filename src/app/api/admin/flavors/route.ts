@@ -11,36 +11,24 @@ const createFlavorSchema = z.object({
   description: z.string().trim().optional().nullable(),
 });
 
-const NAME_COLUMNS = [
-  "name",
-  "flavor_name",
-  "title",
-  "flavor",
-  "humor_flavor",
-  "humor_flavor_name",
-  "label",
-] as const;
+const NAME_COLUMNS = ["slug", "name", "flavor_name", "title", "flavor", "humor_flavor", "humor_flavor_name", "label"] as const;
 const DESCRIPTION_COLUMNS = ["description", "details", "flavor_description", "summary"] as const;
-const OWNER_COLUMNS = [
-  "created_by",
-  "user_id",
-  "owner_id",
-  "profile_id",
-  "admin_id",
-  "created_by_user_id",
-] as const;
-const TIMESTAMP_COLUMNS = ["created_at", "updated_at"] as const;
 
-type FlavorColumnHints = {
+type FlavorSchema = {
+  idColumn: string | null;
   nameColumn: string | null;
   descriptionColumn: string | null;
-  ownerColumns: string[];
-  timestampColumns: string[];
+  createdByUserIdColumn: string | null;
+  modifiedByUserIdColumn: string | null;
+  createdDatetimeUtcColumn: string | null;
+  modifiedDatetimeUtcColumn: string | null;
+  isPinnedColumn: string | null;
 };
 
 function normalizeFlavorRow(row: Record<string, unknown>) {
   const id = String(row.id ?? row.flavor_id ?? row.humor_flavor_id ?? "");
   const name =
+    (typeof row.slug === "string" && row.slug) ||
     (typeof row.name === "string" && row.name) ||
     (typeof row.flavor_name === "string" && row.flavor_name) ||
     (typeof row.title === "string" && row.title) ||
@@ -52,10 +40,12 @@ function normalizeFlavorRow(row: Record<string, unknown>) {
         ? row.details
         : null;
   const createdAt =
+    (typeof row.created_datetime_utc === "string" && row.created_datetime_utc) ||
     (typeof row.created_at === "string" && row.created_at) ||
     (typeof row.createdAt === "string" && row.createdAt) ||
     new Date(0).toISOString();
   const updatedAt =
+    (typeof row.modified_datetime_utc === "string" && row.modified_datetime_utc) ||
     (typeof row.updated_at === "string" && row.updated_at) ||
     (typeof row.updatedAt === "string" && row.updatedAt) ||
     createdAt;
@@ -69,115 +59,95 @@ function normalizeFlavorRow(row: Record<string, unknown>) {
   };
 }
 
-function inferFlavorColumnHintsFromRow(row: Record<string, unknown>): FlavorColumnHints {
-  const keys = new Set(Object.keys(row));
+function slugifyFlavorName(name: string) {
+  const slug = name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 
+  return slug || "flavor";
+}
+
+async function columnExists(supabase: SupabaseClient, table: string, column: string) {
+  const { error } = await supabase.from(table).select(column).limit(1);
+  return !error;
+}
+
+async function findFirstExistingColumn(
+  supabase: SupabaseClient,
+  table: string,
+  candidates: readonly string[],
+) {
+  for (const candidate of candidates) {
+    if (await columnExists(supabase, table, candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function detectFlavorSchema(supabase: SupabaseClient): Promise<FlavorSchema> {
   return {
-    nameColumn: NAME_COLUMNS.find((column) => keys.has(column)) ?? null,
-    descriptionColumn: DESCRIPTION_COLUMNS.find((column) => keys.has(column)) ?? null,
-    ownerColumns: OWNER_COLUMNS.filter((column) => keys.has(column)),
-    timestampColumns: TIMESTAMP_COLUMNS.filter((column) => keys.has(column)),
+    idColumn: await findFirstExistingColumn(supabase, TABLES.flavors, ["id", "flavor_id", "humor_flavor_id"]),
+    nameColumn: await findFirstExistingColumn(supabase, TABLES.flavors, NAME_COLUMNS),
+    descriptionColumn: await findFirstExistingColumn(supabase, TABLES.flavors, DESCRIPTION_COLUMNS),
+    createdByUserIdColumn: (await columnExists(supabase, TABLES.flavors, "created_by_user_id"))
+      ? "created_by_user_id"
+      : null,
+    modifiedByUserIdColumn: (await columnExists(supabase, TABLES.flavors, "modified_by_user_id"))
+      ? "modified_by_user_id"
+      : null,
+    createdDatetimeUtcColumn: (await columnExists(supabase, TABLES.flavors, "created_datetime_utc"))
+      ? "created_datetime_utc"
+      : null,
+    modifiedDatetimeUtcColumn: (await columnExists(supabase, TABLES.flavors, "modified_datetime_utc"))
+      ? "modified_datetime_utc"
+      : null,
+    isPinnedColumn: (await columnExists(supabase, TABLES.flavors, "is_pinned")) ? "is_pinned" : null,
   };
 }
 
-async function inferFlavorColumnHints(supabase: SupabaseClient) {
-  const { data, error } = await supabase.from(TABLES.flavors).select("*").limit(1);
-  if (error || !data || data.length === 0) {
-    return null;
-  }
-
-  return inferFlavorColumnHintsFromRow((data[0] ?? {}) as Record<string, unknown>);
-}
-
-function buildFlavorInsertPayloads(args: {
+function buildFlavorInsertPayload(args: {
+  schema: FlavorSchema;
   name: string;
   description: string | null;
   userId: string;
-  hints: FlavorColumnHints | null;
+  slugValue: string;
 }) {
-  const payloads: Record<string, unknown>[] = [];
-  const nowIso = new Date().toISOString();
-
-  const candidateNameColumns = args.hints?.nameColumn
-    ? [args.hints.nameColumn, ...NAME_COLUMNS.filter((column) => column !== args.hints?.nameColumn)]
-    : [...NAME_COLUMNS];
-
-  const candidateDescriptionColumns = args.hints?.descriptionColumn
-    ? [args.hints.descriptionColumn, ...DESCRIPTION_COLUMNS.filter((column) => column !== args.hints?.descriptionColumn)]
-    : [...DESCRIPTION_COLUMNS];
-
-  const candidateOwnerColumns = args.hints?.ownerColumns.length ? args.hints.ownerColumns : [...OWNER_COLUMNS];
-  const includeCreatedAt = Boolean(args.hints?.timestampColumns.includes("created_at"));
-  const includeUpdatedAt = Boolean(args.hints?.timestampColumns.includes("updated_at"));
-
-  for (const nameColumn of candidateNameColumns) {
-    const base: Record<string, unknown> = {
-      [nameColumn]: args.name,
-    };
-
-    // Always try the minimal payload first.
-    payloads.push(base);
-
-    // Then try likely ownership columns for schemas with NOT NULL ownership constraints.
-    for (const ownerColumn of candidateOwnerColumns) {
-      payloads.push({
-        ...base,
-        [ownerColumn]: args.userId,
-      });
-      payloads.push({
-        ...base,
-        [ownerColumn]: args.userId,
-        updated_by: args.userId,
-      });
-    }
-
-    // Description variants are optional and tested after safer combinations.
-    for (const descriptionColumn of candidateDescriptionColumns) {
-      payloads.push({
-        ...base,
-        [descriptionColumn]: args.description,
-      });
-    }
-
-    for (const descriptionColumn of candidateDescriptionColumns) {
-      for (const ownerColumn of candidateOwnerColumns) {
-        payloads.push({
-          ...base,
-          [descriptionColumn]: args.description,
-          [ownerColumn]: args.userId,
-        });
-        payloads.push({
-          ...base,
-          [descriptionColumn]: args.description,
-          [ownerColumn]: args.userId,
-          updated_by: args.userId,
-        });
-      }
-    }
+  if (!args.schema.nameColumn) {
+    return null;
   }
 
-  if (includeCreatedAt || includeUpdatedAt) {
-    const withTimestamps: Record<string, unknown>[] = [];
-    for (const payload of payloads) {
-      withTimestamps.push(payload);
-      withTimestamps.push({
-        ...payload,
-        ...(includeCreatedAt ? { created_at: nowIso } : {}),
-        ...(includeUpdatedAt ? { updated_at: nowIso } : {}),
-      });
-    }
-    payloads.splice(0, payloads.length, ...withTimestamps);
+  const payload: Record<string, unknown> = {
+    [args.schema.nameColumn]: args.schema.nameColumn === "slug" ? args.slugValue : args.name,
+  };
+
+  if (args.schema.descriptionColumn) {
+    payload[args.schema.descriptionColumn] = args.description;
   }
 
-  const seen = new Set<string>();
-  return payloads.filter((payload) => {
-    const key = JSON.stringify(payload);
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
+  if (args.schema.createdByUserIdColumn) {
+    payload[args.schema.createdByUserIdColumn] = args.userId;
+  }
+
+  if (args.schema.modifiedByUserIdColumn) {
+    payload[args.schema.modifiedByUserIdColumn] = args.userId;
+  }
+
+  if (args.schema.createdDatetimeUtcColumn) {
+    payload[args.schema.createdDatetimeUtcColumn] = new Date().toISOString();
+  }
+
+  if (args.schema.modifiedDatetimeUtcColumn) {
+    payload[args.schema.modifiedDatetimeUtcColumn] = new Date().toISOString();
+  }
+
+  if (args.schema.isPinnedColumn) {
+    payload[args.schema.isPinnedColumn] = false;
+  }
+
+  return payload;
 }
 
 export async function GET(request: Request) {
@@ -186,14 +156,14 @@ export async function GET(request: Request) {
     return auth.response;
   }
 
-  const attemptOrdered = await auth.supabase
-    .from(TABLES.flavors)
-    .select("*")
-    .order("created_at", { ascending: false });
+  const orderColumns = ["created_datetime_utc", "created_at", "id"];
 
-  if (!attemptOrdered.error) {
-    const rows = (attemptOrdered.data ?? []).map((row) => normalizeFlavorRow(row as Record<string, unknown>));
-    return NextResponse.json({ flavors: rows });
+  for (const orderColumn of orderColumns) {
+    const ordered = await auth.supabase.from(TABLES.flavors).select("*").order(orderColumn, { ascending: false });
+    if (!ordered.error) {
+      const rows = (ordered.data ?? []).map((row) => normalizeFlavorRow(row as Record<string, unknown>));
+      return NextResponse.json({ flavors: rows });
+    }
   }
 
   const fallback = await auth.supabase.from(TABLES.flavors).select("*");
@@ -217,31 +187,34 @@ export async function POST(request: Request) {
   }
 
   const { name, description } = parsed.data;
-  const hints = await inferFlavorColumnHints(auth.supabase);
-  const insertPayloads = buildFlavorInsertPayloads({
-    name,
-    description: description || null,
-    userId: auth.user.id,
-    hints,
-  });
+  const schema = await detectFlavorSchema(auth.supabase);
+  if (!schema.nameColumn) {
+    return NextResponse.json(
+      {
+        error:
+          "Failed to create flavor: no supported flavor name column found. Expected one of: slug, name, flavor_name, title, flavor, humor_flavor, humor_flavor_name, label.",
+      },
+      { status: 500 },
+    );
+  }
 
+  const baseSlug = slugifyFlavorName(name);
   let createdFlavor: Record<string, unknown> | null = null;
-  let lastErrorMessage = "Unable to create flavor with available column mappings.";
-  const missingColumns = new Set<string>();
+  let lastErrorMessage = "Unable to create flavor.";
 
-  const payloadHasMissingColumn = (payload: Record<string, unknown>) =>
-    Object.keys(payload).some((key) => missingColumns.has(key));
+  for (let i = 0; i < 6; i += 1) {
+    const slug = i === 0 ? baseSlug : `${baseSlug}-${i + 1}`;
+    const payload = buildFlavorInsertPayload({
+      schema,
+      name,
+      description: description || null,
+      userId: auth.user.id,
+      slugValue: slug,
+    });
 
-  const rememberMissingColumn = (message: string) => {
-    const match = message.match(/Could not find the '([^']+)' column/i);
-    if (match?.[1]) {
-      missingColumns.add(match[1]);
-    }
-  };
-
-  for (const payload of insertPayloads) {
-    if (payloadHasMissingColumn(payload)) {
-      continue;
+    if (!payload) {
+      lastErrorMessage = "Could not build insert payload for this schema.";
+      break;
     }
 
     const { data, error } = await auth.supabase
@@ -258,7 +231,15 @@ export async function POST(request: Request) {
     if (error) {
       const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
       lastErrorMessage = details || error.message;
-      rememberMissingColumn(lastErrorMessage);
+
+      const isSlugUniqueViolation =
+        error.code === "23505" ||
+        /slug_key/i.test(error.message) ||
+        /unique/i.test(error.message);
+
+      if (schema.nameColumn !== "slug" || !isSlugUniqueViolation) {
+        break;
+      }
     }
   }
 

@@ -3,7 +3,6 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
-import { TABLES } from "@/lib/config";
 
 type Props = {
   children: ReactNode;
@@ -57,7 +56,7 @@ export function AuthGate({ children }: Props) {
   const [user, setUser] = useState<User | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
 
-  async function evaluateUser(nextUser: User | null) {
+  async function evaluateUser(nextUser: User | null, accessToken?: string | null) {
     setUser(nextUser);
 
     if (!nextUser) {
@@ -67,20 +66,38 @@ export function AuthGate({ children }: Props) {
 
     try {
       const supabase = getBrowserSupabaseClient();
-      const { data, error } = await supabase
-        .from(TABLES.profiles)
-        .select("is_superadmin,is_matrix_admin")
-        .eq("id", nextUser.id)
-        .maybeSingle();
+      const token =
+        accessToken ??
+        (await supabase.auth.getSession()).data.session?.access_token ??
+        null;
 
-      if (error) {
-        setErrorMessage(error.message);
+      if (!token) {
+        setStatus("signed-out");
+        return;
+      }
+
+      const response = await fetch("/api/admin/me", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const payload = (await response.json().catch(() => null)) as
+        | { error?: string; authorized?: boolean }
+        | null;
+
+      if (!response.ok) {
+        if (response.status === 403) {
+          setStatus("denied");
+          return;
+        }
+
+        setErrorMessage(payload?.error ?? "Failed to verify admin role.");
         setStatus("error");
         return;
       }
 
-      const authorized = Boolean(data?.is_superadmin || data?.is_matrix_admin);
-      if (!authorized) {
+      if (!payload?.authorized) {
         setStatus("denied");
         return;
       }
@@ -94,6 +111,7 @@ export function AuthGate({ children }: Props) {
 
   useEffect(() => {
     let mounted = true;
+    let unsubscribe: (() => void) | null = null;
 
     async function init() {
       try {
@@ -102,14 +120,18 @@ export function AuthGate({ children }: Props) {
         if (!mounted) {
           return;
         }
-        await evaluateUser(data.session?.user ?? null);
+        await evaluateUser(data.session?.user ?? null, data.session?.access_token ?? null);
 
-        supabase.auth.onAuthStateChange(async (_event, session) => {
+        const {
+          data: { subscription },
+        } = supabase.auth.onAuthStateChange(async (_event, session) => {
           if (!mounted) {
             return;
           }
-          await evaluateUser(session?.user ?? null);
+          await evaluateUser(session?.user ?? null, session?.access_token ?? null);
         });
+
+        unsubscribe = () => subscription.unsubscribe();
       } catch (error) {
         if (mounted) {
           setErrorMessage(error instanceof Error ? error.message : "Authentication bootstrap failed.");
@@ -122,6 +144,7 @@ export function AuthGate({ children }: Props) {
 
     return () => {
       mounted = false;
+      unsubscribe?.();
     };
   }, []);
 

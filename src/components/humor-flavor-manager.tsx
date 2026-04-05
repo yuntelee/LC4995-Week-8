@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, Play, Save, Trash2 } from "lucide-react";
-import { TABLES } from "@/lib/config";
 import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
 import type {
   CaptionHistoryItem,
@@ -112,65 +111,97 @@ export function HumorFlavorManager() {
     [flavors, selectedFlavorId],
   );
 
+  const getAccessToken = useCallback(async () => {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    const token = data.session?.access_token;
+    if (!token) {
+      throw new Error("Please sign in again.");
+    }
+
+    return token;
+  }, [supabase]);
+
+  const apiRequest = useCallback(
+    async <T,>(url: string, init: RequestInit = {}): Promise<T> => {
+      const token = await getAccessToken();
+      const headers = new Headers(init.headers ?? {});
+      headers.set("Authorization", `Bearer ${token}`);
+
+      if (init.body) {
+        headers.set("Content-Type", "application/json");
+      }
+
+      const response = await fetch(url, {
+        ...init,
+        headers,
+      });
+
+      const payload = (await response.json().catch(() => null)) as
+        | { error?: string }
+        | T
+        | null;
+
+      if (!response.ok) {
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Request failed (${response.status}).`;
+        throw new Error(message);
+      }
+
+      return payload as T;
+    },
+    [getAccessToken],
+  );
+
   const loadFlavors = useCallback(async () => {
     setLoadingFlavors(true);
     setStatus("");
 
-    const { data, error } = await supabase
-      .from(TABLES.flavors)
-      .select("id,name,description,created_at,updated_at")
-      .order("created_at", { ascending: false });
-
-    setLoadingFlavors(false);
-
-    if (error) {
-      setStatus(`Failed to load humor flavors: ${error.message}`);
-      return;
+    try {
+      const payload = await apiRequest<{ flavors: HumorFlavor[] }>("/api/admin/flavors");
+      const rows = payload.flavors ?? [];
+      setFlavors(rows);
+      setSelectedFlavorId((previous) => {
+        if (!rows.length) {
+          return null;
+        }
+        if (previous && rows.some((row) => row.id === previous)) {
+          return previous;
+        }
+        return rows[0].id;
+      });
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Failed to load humor flavors.");
+    } finally {
+      setLoadingFlavors(false);
     }
-
-    const rows = (data ?? []) as HumorFlavor[];
-    setFlavors(rows);
-
-    if (!selectedFlavorId && rows.length > 0) {
-      setSelectedFlavorId(rows[0].id);
-    }
-
-    if (rows.length === 0) {
-      setSelectedFlavorId(null);
-    }
-  }, [selectedFlavorId, supabase]);
+  }, [apiRequest]);
 
   const loadSteps = useCallback(async (flavorId: string) => {
-    const { data, error } = await supabase
-      .from(TABLES.steps)
-      .select("id,humor_flavor_id,order_index,title,prompt_template,input_source,created_at,updated_at")
-      .eq("humor_flavor_id", flavorId)
-      .order("order_index", { ascending: true });
-
-    if (error) {
-      setStatus(`Failed to load steps: ${error.message}`);
-      return;
+    try {
+      const payload = await apiRequest<{ steps: HumorFlavorStep[] }>(`/api/admin/flavors/${flavorId}/steps`);
+      setSteps(payload.steps ?? []);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Failed to load steps.");
     }
-
-    setSteps((data ?? []) as HumorFlavorStep[]);
-  }, [supabase]);
+  }, [apiRequest]);
 
   const loadHistory = useCallback(async (flavorId: string) => {
-    const { data, error } = await supabase
-      .from(TABLES.history)
-      .select("id,humor_flavor_id,image_url,captions,trace,created_at")
-      .eq("humor_flavor_id", flavorId)
-      .order("created_at", { ascending: false })
-      .limit(10);
-
-    if (error) {
-      setStatus(`Failed to load history: ${error.message}`);
-      return;
+    try {
+      const payload = await apiRequest<{ history: Record<string, unknown>[] }>(
+        `/api/admin/flavors/${flavorId}/history?limit=10`,
+      );
+      const nextHistory = (payload.history ?? []).map((row) => normalizeHistoryRow(row));
+      setHistory(nextHistory);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Failed to load history.");
     }
-
-    const nextHistory = (data ?? []).map((row) => normalizeHistoryRow(row as Record<string, unknown>));
-    setHistory(nextHistory);
-  }, [supabase]);
+  }, [apiRequest]);
 
   useEffect(() => {
     void loadFlavors();
@@ -197,38 +228,39 @@ export function HumorFlavorManager() {
       return;
     }
 
-    const { error } = await supabase.from(TABLES.flavors).insert({
-      name: newFlavor.name.trim(),
-      description: newFlavor.description.trim() || null,
-    });
+    try {
+      await apiRequest<{ flavor: HumorFlavor }>("/api/admin/flavors", {
+        method: "POST",
+        body: JSON.stringify({
+          name: newFlavor.name.trim(),
+          description: newFlavor.description.trim() || null,
+        }),
+      });
 
-    if (error) {
-      setStatus(`Create failed: ${error.message}`);
-      return;
+      setNewFlavor(EMPTY_FLAVOR_DRAFT);
+      setStatus("Humor flavor created.");
+      await loadFlavors();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Create failed.");
     }
-
-    setNewFlavor(EMPTY_FLAVOR_DRAFT);
-    setStatus("Humor flavor created.");
-    await loadFlavors();
   }
 
   async function saveFlavor(flavorId: string) {
-    const { error } = await supabase
-      .from(TABLES.flavors)
-      .update({
-        name: editingFlavorDraft.name.trim(),
-        description: editingFlavorDraft.description.trim() || null,
-      })
-      .eq("id", flavorId);
+    try {
+      await apiRequest<{ flavor: HumorFlavor }>(`/api/admin/flavors/${flavorId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: editingFlavorDraft.name.trim(),
+          description: editingFlavorDraft.description.trim() || null,
+        }),
+      });
 
-    if (error) {
-      setStatus(`Update failed: ${error.message}`);
-      return;
+      setEditingFlavorId(null);
+      setStatus("Flavor updated.");
+      await loadFlavors();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Update failed.");
     }
-
-    setEditingFlavorId(null);
-    setStatus("Flavor updated.");
-    await loadFlavors();
   }
 
   async function deleteFlavor(flavorId: string) {
@@ -237,18 +269,19 @@ export function HumorFlavorManager() {
       return;
     }
 
-    const { error } = await supabase.from(TABLES.flavors).delete().eq("id", flavorId);
+    try {
+      await apiRequest<{ ok: true }>(`/api/admin/flavors/${flavorId}`, {
+        method: "DELETE",
+      });
 
-    if (error) {
-      setStatus(`Delete failed: ${error.message}`);
-      return;
+      setStatus("Flavor deleted.");
+      if (selectedFlavorId === flavorId) {
+        setSelectedFlavorId(null);
+      }
+      await loadFlavors();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Delete failed.");
     }
-
-    setStatus("Flavor deleted.");
-    if (selectedFlavorId === flavorId) {
-      setSelectedFlavorId(null);
-    }
-    await loadFlavors();
   }
 
   async function createStep(e: React.FormEvent<HTMLFormElement>) {
@@ -264,63 +297,70 @@ export function HumorFlavorManager() {
       return;
     }
 
-    const { error } = await supabase.from(TABLES.steps).insert({
-      humor_flavor_id: selectedFlavorId,
-      order_index: steps.length + 1,
-      title: newStep.title.trim(),
-      prompt_template: newStep.prompt_template.trim(),
-      input_source: newStep.input_source,
-    });
+    try {
+      await apiRequest<{ step: HumorFlavorStep }>(`/api/admin/flavors/${selectedFlavorId}/steps`, {
+        method: "POST",
+        body: JSON.stringify({
+          order_index: steps.length + 1,
+          title: newStep.title.trim(),
+          prompt_template: newStep.prompt_template.trim(),
+          input_source: newStep.input_source,
+        }),
+      });
 
-    if (error) {
-      setStatus(`Create step failed: ${error.message}`);
-      return;
+      setNewStep(EMPTY_STEP_DRAFT);
+      setStatus("Step created.");
+      await loadSteps(selectedFlavorId);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Create step failed.");
     }
-
-    setNewStep(EMPTY_STEP_DRAFT);
-    setStatus("Step created.");
-    await loadSteps(selectedFlavorId);
   }
 
   async function saveStep(stepId: string) {
-    const { error } = await supabase
-      .from(TABLES.steps)
-      .update({
-        title: editingStepDraft.title.trim(),
-        prompt_template: editingStepDraft.prompt_template.trim(),
-        input_source: editingStepDraft.input_source,
-      })
-      .eq("id", stepId);
+    try {
+      await apiRequest<{ step: HumorFlavorStep }>(`/api/admin/steps/${stepId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          title: editingStepDraft.title.trim(),
+          prompt_template: editingStepDraft.prompt_template.trim(),
+          input_source: editingStepDraft.input_source,
+        }),
+      });
 
-    if (error) {
-      setStatus(`Update step failed: ${error.message}`);
-      return;
-    }
-
-    setEditingStepId(null);
-    setStatus("Step updated.");
-    if (selectedFlavorId) {
-      await loadSteps(selectedFlavorId);
+      setEditingStepId(null);
+      setStatus("Step updated.");
+      if (selectedFlavorId) {
+        await loadSteps(selectedFlavorId);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Update step failed.");
     }
   }
 
   async function persistOrder(updatedSteps: HumorFlavorStep[]) {
-    const updates = withOrder(updatedSteps);
-
-    const results = await Promise.all(
-      updates.map((step) =>
-        supabase.from(TABLES.steps).update({ order_index: step.order_index }).eq("id", step.id),
-      ),
-    );
-
-    const errored = results.find((result) => result.error);
-    if (errored?.error) {
-      setStatus(`Reorder failed: ${errored.error.message}`);
+    if (!selectedFlavorId) {
       return false;
     }
 
-    setSteps(updates);
-    return true;
+    const updates = withOrder(updatedSteps);
+
+    try {
+      const payload = await apiRequest<{ steps: HumorFlavorStep[] }>(
+        `/api/admin/flavors/${selectedFlavorId}/reorder`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            orderedStepIds: updates.map((step) => step.id),
+          }),
+        },
+      );
+
+      setSteps(payload.steps ?? updates);
+      return true;
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Reorder failed.");
+      return false;
+    }
   }
 
   async function moveStep(stepId: string, direction: "up" | "down") {
@@ -350,16 +390,17 @@ export function HumorFlavorManager() {
       return;
     }
 
-    const { error } = await supabase.from(TABLES.steps).delete().eq("id", stepId);
-    if (error) {
-      setStatus(`Delete step failed: ${error.message}`);
-      return;
-    }
+    try {
+      await apiRequest<{ ok: true }>(`/api/admin/steps/${stepId}`, {
+        method: "DELETE",
+      });
 
-    const remaining = steps.filter((step) => step.id !== stepId);
-    const success = await persistOrder(remaining);
-    if (success) {
+      if (selectedFlavorId) {
+        await loadSteps(selectedFlavorId);
+      }
       setStatus("Step deleted.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Delete step failed.");
     }
   }
 
@@ -378,31 +419,22 @@ export function HumorFlavorManager() {
     setStatus("");
 
     try {
-      const response = await fetch("/api/test-humor-flavor", {
+      const payload = await apiRequest<{
+        error?: string;
+        captions?: string[];
+        trace?: ExecutionTrace[];
+        warning?: string;
+      }>("/api/test-humor-flavor", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
         body: JSON.stringify({
           flavorId: selectedFlavorId,
           imageUrl: imageUrl.trim(),
         }),
       });
 
-      const payload = (await response.json()) as {
-        error?: string;
-        captions?: string[];
-        trace?: ExecutionTrace[];
-      };
-
-      if (!response.ok) {
-        setStatus(payload.error ?? "Test failed.");
-        return;
-      }
-
       setGeneratedCaptions(payload.captions ?? []);
       setLatestTrace(payload.trace ?? []);
-      setStatus("Test completed.");
+      setStatus(payload.warning ? `Test completed with warning: ${payload.warning}` : "Test completed.");
 
       await loadHistory(selectedFlavorId);
     } catch (error) {

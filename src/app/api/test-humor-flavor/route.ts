@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { executePromptStep } from "@/lib/almostcrackd";
 import { TABLES } from "@/lib/config";
-import { getServiceSupabaseClient } from "@/lib/supabase/server";
+import { requireAdmin } from "@/lib/server/admin-auth";
 import type { ExecutionTrace, HumorFlavorStep } from "@/types/humor";
 
 export const runtime = "nodejs";
@@ -29,6 +29,11 @@ function inferCaptionsFromText(text: string) {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireAdmin(request);
+    if ("response" in auth) {
+      return auth.response;
+    }
+
     const parsed = requestSchema.safeParse(await request.json());
     if (!parsed.success) {
       return NextResponse.json(
@@ -41,7 +46,7 @@ export async function POST(request: Request) {
     }
 
     const { flavorId, imageUrl } = parsed.data;
-    const supabase = getServiceSupabaseClient();
+    const supabase = auth.supabase;
 
     const { data: stepsData, error: stepsError } = await supabase
       .from(TABLES.steps)

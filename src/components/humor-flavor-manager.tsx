@@ -350,7 +350,10 @@ export function HumorFlavorManager() {
         {
           method: "POST",
           body: JSON.stringify({
-            orderedStepIds: updates.map((step) => step.id),
+            orderedStepIds: updates.map((step) => {
+              const numeric = Number(step.id);
+              return Number.isFinite(numeric) ? numeric : step.id;
+            }),
           }),
         },
       );

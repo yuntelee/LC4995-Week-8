@@ -2,6 +2,13 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { TABLES } from "@/lib/config";
 import { requireAdmin } from "@/lib/server/admin-auth";
+import {
+  countFlavorSteps,
+  inputSourceToLlmInputTypeId,
+  mapDbStepRowToUi,
+  normalizeFlavorId,
+  resolveStepForeignKeys,
+} from "@/lib/server/humor-step-utils";
 
 export const runtime = "nodejs";
 
@@ -22,19 +29,36 @@ export async function GET(request: Request, context: RouteContext) {
     return auth.response;
   }
 
-  const { flavorId } = await context.params;
+  const { flavorId: rawFlavorId } = await context.params;
+  let flavorId: number;
+  try {
+    flavorId = normalizeFlavorId(rawFlavorId);
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid flavor id." }, { status: 400 });
+  }
+
+  let defaults;
+  try {
+    defaults = await resolveStepForeignKeys(auth.supabase);
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to resolve step defaults." }, { status: 500 });
+  }
 
   const { data, error } = await auth.supabase
     .from(TABLES.steps)
-    .select("id,humor_flavor_id,order_index,title,prompt_template,input_source,created_at,updated_at")
+    .select(
+      "id,humor_flavor_id,order_by,llm_input_type_id,llm_user_prompt,llm_system_prompt,description,created_datetime_utc,modified_datetime_utc",
+    )
     .eq("humor_flavor_id", flavorId)
-    .order("order_index", { ascending: true });
+    .order("order_by", { ascending: true });
 
   if (error) {
     return NextResponse.json({ error: `Failed to load steps: ${error.message}` }, { status: 500 });
   }
 
-  return NextResponse.json({ steps: data ?? [] });
+  const steps = (data ?? []).map((row) => mapDbStepRowToUi(row as Record<string, unknown>, defaults.imageInputTypeId));
+
+  return NextResponse.json({ steps });
 }
 
 export async function POST(request: Request, context: RouteContext) {
@@ -43,7 +67,14 @@ export async function POST(request: Request, context: RouteContext) {
     return auth.response;
   }
 
-  const { flavorId } = await context.params;
+  const { flavorId: rawFlavorId } = await context.params;
+  let flavorId: number;
+  try {
+    flavorId = normalizeFlavorId(rawFlavorId);
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid flavor id." }, { status: 400 });
+  }
+
   const parsed = createStepSchema.safeParse(await request.json());
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Invalid payload." }, { status: 400 });
@@ -51,35 +82,55 @@ export async function POST(request: Request, context: RouteContext) {
 
   const payload = parsed.data;
 
+  let defaults;
+  try {
+    defaults = await resolveStepForeignKeys(auth.supabase);
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to resolve step defaults." }, { status: 500 });
+  }
+
   let orderIndex = payload.order_index;
   if (!orderIndex) {
-    const { count, error: countError } = await auth.supabase
-      .from(TABLES.steps)
-      .select("id", { count: "exact", head: true })
-      .eq("humor_flavor_id", flavorId);
-
-    if (countError) {
-      return NextResponse.json({ error: `Failed to compute step order: ${countError.message}` }, { status: 500 });
+    try {
+      const count = await countFlavorSteps(auth.supabase, flavorId);
+      orderIndex = count + 1;
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Failed to compute step order." },
+        { status: 500 },
+      );
     }
-
-    orderIndex = (count ?? 0) + 1;
   }
+
+  const llmInputTypeId = inputSourceToLlmInputTypeId(payload.input_source, defaults);
 
   const { data, error } = await auth.supabase
     .from(TABLES.steps)
     .insert({
       humor_flavor_id: flavorId,
-      title: payload.title,
-      prompt_template: payload.prompt_template,
-      input_source: payload.input_source,
-      order_index: orderIndex,
+      order_by: orderIndex,
+      llm_input_type_id: llmInputTypeId,
+      llm_output_type_id: defaults.defaultOutputTypeId,
+      llm_model_id: defaults.defaultModelId,
+      humor_flavor_step_type_id: defaults.defaultStepTypeId,
+      llm_temperature: null,
+      llm_system_prompt: null,
+      llm_user_prompt: payload.prompt_template,
+      description: payload.title,
+      created_by_user_id: auth.user.id,
+      modified_by_user_id: auth.user.id,
     })
-    .select("id,humor_flavor_id,order_index,title,prompt_template,input_source,created_at,updated_at")
+    .select(
+      "id,humor_flavor_id,order_by,llm_input_type_id,llm_user_prompt,llm_system_prompt,description,created_datetime_utc,modified_datetime_utc",
+    )
     .single();
 
   if (error) {
-    return NextResponse.json({ error: `Failed to create step: ${error.message}` }, { status: 500 });
+    const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
+    return NextResponse.json({ error: `Failed to create step: ${details}` }, { status: 500 });
   }
 
-  return NextResponse.json({ step: data }, { status: 201 });
+  const step = mapDbStepRowToUi((data ?? {}) as Record<string, unknown>, defaults.imageInputTypeId);
+
+  return NextResponse.json({ step }, { status: 201 });
 }

@@ -3,12 +3,13 @@ import { z } from "zod";
 import { runCaptionPipelineFromImageUrl } from "@/lib/almostcrackd";
 import { TABLES } from "@/lib/config";
 import { requireAdmin } from "@/lib/server/admin-auth";
-import type { ExecutionTrace, HumorFlavorStep } from "@/types/humor";
+import { normalizeFlavorId } from "@/lib/server/humor-step-utils";
+import type { ExecutionTrace } from "@/types/humor";
 
 export const runtime = "nodejs";
 
 const requestSchema = z.object({
-  flavorId: z.string().uuid(),
+  flavorId: z.union([z.number().int().positive(), z.string().regex(/^\d+$/)]),
   imageUrl: z.string().url(),
 });
 
@@ -37,14 +38,19 @@ export async function POST(request: Request) {
       );
     }
 
-    const { flavorId, imageUrl } = parsed.data;
+    const { imageUrl } = parsed.data;
+    const flavorId =
+      typeof parsed.data.flavorId === "number"
+        ? parsed.data.flavorId
+        : normalizeFlavorId(parsed.data.flavorId);
+
     const supabase = auth.supabase;
 
     const { data: stepsData, error: stepsError } = await supabase
       .from(TABLES.steps)
-      .select("id,humor_flavor_id,order_index,title,prompt_template,input_source")
+      .select("id,humor_flavor_id,order_by,llm_user_prompt,llm_system_prompt,description,llm_input_type_id")
       .eq("humor_flavor_id", flavorId)
-      .order("order_index", { ascending: true });
+      .order("order_by", { ascending: true });
 
     if (stepsError) {
       return NextResponse.json(
@@ -55,7 +61,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const steps = (stepsData ?? []) as HumorFlavorStep[];
+    const steps = (stepsData ?? []) as Array<Record<string, unknown>>;
     if (steps.length === 0) {
       return NextResponse.json(
         {
@@ -66,11 +72,13 @@ export async function POST(request: Request) {
     }
 
     const stepPrompts = steps.map((step, index) => ({
-      stepId: step.id,
-      stepTitle: step.title,
+      stepId: String(step.id ?? ""),
+      stepTitle: (typeof step.description === "string" && step.description) || `Step ${index + 1}`,
       renderedPrompt: renderPrompt(
-        step.prompt_template,
-        step.input_source === "image" ? imageUrl : `{{step_${Math.max(1, index)}_output}}`,
+        ((typeof step.llm_user_prompt === "string" && step.llm_user_prompt) ||
+          (typeof step.llm_system_prompt === "string" && step.llm_system_prompt) ||
+          "") as string,
+        index === 0 ? imageUrl : `{{step_${Math.max(1, index)}_output}}`,
         imageUrl,
       ),
     }));
@@ -78,7 +86,7 @@ export async function POST(request: Request) {
     const pipelineResult = await runCaptionPipelineFromImageUrl({
       token: auth.accessToken,
       sourceImageUrl: imageUrl,
-      humorFlavorId: flavorId,
+      humorFlavorId: String(flavorId),
     });
 
     const trace: ExecutionTrace[] = [

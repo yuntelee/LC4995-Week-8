@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { executePromptStep } from "@/lib/almostcrackd";
+import { runCaptionPipelineFromImageUrl } from "@/lib/almostcrackd";
 import { TABLES } from "@/lib/config";
 import { requireAdmin } from "@/lib/server/admin-auth";
 import type { ExecutionTrace, HumorFlavorStep } from "@/types/humor";
@@ -17,14 +17,6 @@ function renderPrompt(template: string, inputText: string, imageUrl: string) {
     .replaceAll("{{input}}", inputText)
     .replaceAll("{{previous_output}}", inputText)
     .replaceAll("{{image_url}}", imageUrl);
-}
-
-function inferCaptionsFromText(text: string) {
-  return text
-    .split(/\n+/)
-    .map((line) => line.trim().replace(/^[-*\d.\s]+/, ""))
-    .filter(Boolean)
-    .slice(0, 5);
 }
 
 export async function POST(request: Request) {
@@ -73,41 +65,66 @@ export async function POST(request: Request) {
       );
     }
 
-    let previousOutput = "";
-    let finalCaptions: string[] = [];
-    const trace: ExecutionTrace[] = [];
-
-    for (const step of steps) {
-      const inputText = step.input_source === "image" ? imageUrl : previousOutput;
-      const prompt = renderPrompt(step.prompt_template, inputText, imageUrl);
-      const response = await executePromptStep({
+    const stepPrompts = steps.map((step, index) => ({
+      stepId: step.id,
+      stepTitle: step.title,
+      renderedPrompt: renderPrompt(
+        step.prompt_template,
+        step.input_source === "image" ? imageUrl : `{{step_${Math.max(1, index)}_output}}`,
         imageUrl,
-        prompt,
-        inputText,
-      });
+      ),
+    }));
 
-      const outputText = response.outputText || JSON.stringify(response.raw);
-      const captions = response.captions;
+    const pipelineResult = await runCaptionPipelineFromImageUrl({
+      token: auth.accessToken,
+      sourceImageUrl: imageUrl,
+      humorFlavorId: flavorId,
+    });
 
-      if (captions.length > 0) {
-        finalCaptions = captions;
-      }
+    const trace: ExecutionTrace[] = [
+      {
+        stepId: "pipeline-generate-presigned-url",
+        stepTitle: "Generate presigned upload URL",
+        prompt: "POST /pipeline/generate-presigned-url",
+        inputText: imageUrl,
+        outputText: pipelineResult.uploadedCdnUrl,
+        captions: [],
+      },
+      {
+        stepId: "pipeline-upload-image-bytes",
+        stepTitle: "Upload image bytes to presigned URL",
+        prompt: "PUT <presignedUrl>",
+        inputText: pipelineResult.uploadedCdnUrl,
+        outputText: "Upload completed",
+        captions: [],
+      },
+      {
+        stepId: "pipeline-register-image",
+        stepTitle: "Register image URL in pipeline",
+        prompt: "POST /pipeline/upload-image-from-url",
+        inputText: pipelineResult.uploadedCdnUrl,
+        outputText: pipelineResult.imageId,
+        captions: [],
+      },
+      {
+        stepId: "pipeline-generate-captions",
+        stepTitle: "Generate captions",
+        prompt: "POST /pipeline/generate-captions",
+        inputText: pipelineResult.imageId,
+        outputText: JSON.stringify(pipelineResult.raw),
+        captions: pipelineResult.captions,
+      },
+      ...stepPrompts.map((item) => ({
+        stepId: item.stepId,
+        stepTitle: item.stepTitle,
+        prompt: item.renderedPrompt,
+        inputText: imageUrl,
+        outputText: "Managed in API pipeline via humorFlavorId",
+        captions: [],
+      })),
+    ];
 
-      previousOutput = captions.length > 0 ? captions.join("\n") : outputText;
-
-      trace.push({
-        stepId: step.id,
-        stepTitle: step.title,
-        prompt,
-        inputText,
-        outputText,
-        captions,
-      });
-    }
-
-    if (finalCaptions.length === 0) {
-      finalCaptions = inferCaptionsFromText(previousOutput);
-    }
+    const finalCaptions = pipelineResult.captions;
 
     const { error: historyError } = await supabase.from(TABLES.history).insert({
       humor_flavor_id: flavorId,
@@ -130,6 +147,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       captions: finalCaptions,
       trace,
+      ...(pipelineResult.warning ? { warning: pipelineResult.warning } : {}),
     });
   } catch (error) {
     return NextResponse.json(

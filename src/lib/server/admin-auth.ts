@@ -6,6 +6,7 @@ import { getServiceSupabaseClient } from "@/lib/supabase/server";
 type AdminAuthSuccess = {
   supabase: SupabaseClient;
   user: User;
+  accessToken: string;
 };
 
 type AdminAuthFailure = {
@@ -69,5 +70,6 @@ export async function requireAdmin(request: Request): Promise<AdminAuthResult> {
   return {
     supabase,
     user: userData.user,
+    accessToken: token,
   };
 }

@@ -57,15 +57,10 @@ function buildFlavorInsertPayloads(args: {
       [nameColumn]: args.name,
     };
 
+    // Always try the minimal payload first.
     payloads.push(base);
 
-    for (const descriptionColumn of DESCRIPTION_COLUMNS) {
-      payloads.push({
-        ...base,
-        [descriptionColumn]: args.description,
-      });
-    }
-
+    // Then try likely ownership columns for schemas with NOT NULL ownership constraints.
     for (const ownerColumn of OWNER_COLUMNS) {
       payloads.push({
         ...base,
@@ -75,6 +70,14 @@ function buildFlavorInsertPayloads(args: {
         ...base,
         [ownerColumn]: args.userId,
         updated_by: args.userId,
+      });
+    }
+
+    // Description variants are optional and tested after safer combinations.
+    for (const descriptionColumn of DESCRIPTION_COLUMNS) {
+      payloads.push({
+        ...base,
+        [descriptionColumn]: args.description,
       });
     }
 
@@ -151,8 +154,23 @@ export async function POST(request: Request) {
 
   let createdFlavor: Record<string, unknown> | null = null;
   let lastErrorMessage = "Unable to create flavor with available column mappings.";
+  const missingColumns = new Set<string>();
+
+  const payloadHasMissingColumn = (payload: Record<string, unknown>) =>
+    Object.keys(payload).some((key) => missingColumns.has(key));
+
+  const rememberMissingColumn = (message: string) => {
+    const match = message.match(/Could not find the '([^']+)' column/i);
+    if (match?.[1]) {
+      missingColumns.add(match[1]);
+    }
+  };
 
   for (const payload of insertPayloads) {
+    if (payloadHasMissingColumn(payload)) {
+      continue;
+    }
+
     const { data, error } = await auth.supabase
       .from(TABLES.flavors)
       .insert(payload)
@@ -167,6 +185,7 @@ export async function POST(request: Request) {
     if (error) {
       const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
       lastErrorMessage = details || error.message;
+      rememberMissingColumn(lastErrorMessage);
     }
   }
 

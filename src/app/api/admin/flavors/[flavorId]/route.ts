@@ -109,8 +109,23 @@ export async function PATCH(request: Request, context: RouteContext) {
 
   let updatedFlavor: Record<string, unknown> | null = null;
   let lastErrorMessage = "Unable to update flavor with available column mappings.";
+  const missingColumns = new Set<string>();
+
+  const payloadHasMissingColumn = (payload: Record<string, unknown>) =>
+    Object.keys(payload).some((key) => missingColumns.has(key));
+
+  const rememberMissingColumn = (message: string) => {
+    const match = message.match(/Could not find the '([^']+)' column/i);
+    if (match?.[1]) {
+      missingColumns.add(match[1]);
+    }
+  };
 
   for (const payload of updatePayloads) {
+    if (payloadHasMissingColumn(payload)) {
+      continue;
+    }
+
     for (const idColumn of ID_COLUMNS) {
       const { data, error } = await auth.supabase
         .from(TABLES.flavors)
@@ -127,6 +142,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       if (error) {
         const details = [error.message, error.details, error.hint].filter(Boolean).join(" | ");
         lastErrorMessage = details || error.message;
+        rememberMissingColumn(lastErrorMessage);
       }
     }
 

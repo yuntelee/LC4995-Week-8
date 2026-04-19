@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, Play, Save, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, Play, Save, Trash2 } from "lucide-react";
 import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
 import type {
   CaptionHistoryItem,
@@ -284,6 +284,35 @@ export function HumorFlavorManager() {
     }
   }
 
+  async function duplicateFlavor(flavorId: string, currentName: string) {
+    const rawName = window.prompt("Name for duplicated flavor", `${currentName} Copy`);
+    if (rawName === null) {
+      return;
+    }
+
+    const requestedName = rawName.trim();
+
+    try {
+      const payload = await apiRequest<{ flavor: HumorFlavor; duplicated_steps: number }>(
+        `/api/admin/flavors/${flavorId}/duplicate`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: requestedName || undefined,
+          }),
+        },
+      );
+
+      setStatus(
+        `Flavor duplicated as \"${payload.flavor.name}\" with ${payload.duplicated_steps} copied step${payload.duplicated_steps === 1 ? "" : "s"}.`,
+      );
+      await loadFlavors();
+      setSelectedFlavorId(payload.flavor.id);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Duplicate failed.");
+    }
+  }
+
   async function createStep(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
@@ -531,6 +560,10 @@ export function HumorFlavorManager() {
                         }}
                       >
                         Edit
+                      </button>
+                      <button className="btn" type="button" onClick={() => void duplicateFlavor(flavor.id, flavor.name)}>
+                        <Copy className="mr-1 inline-block h-4 w-4" />
+                        Duplicate
                       </button>
                       <button className="btn btn-danger" type="button" onClick={() => void deleteFlavor(flavor.id)}>
                         <Trash2 className="mr-1 inline-block h-4 w-4" />

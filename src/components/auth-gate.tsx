@@ -15,20 +15,16 @@ function SignInCard() {
   const [message, setMessage] = useState<string | null>(null);
 
   async function signInWithGoogle() {
+    if (loading) {
+      return;
+    }
+
     setLoading(true);
     setMessage(null);
 
     try {
-      const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-      const origin = siteUrl
-        ? siteUrl.startsWith("http://") || siteUrl.startsWith("https://")
-          ? siteUrl
-          : `https://${siteUrl}`
-        : window.location.origin;
-
       // Navigate to the server-side sign-in route which will redirect to Supabase.
-      const signInUrl = new URL("/auth/sign-in", origin).toString();
-      window.location.assign(signInUrl);
+      window.location.assign("/auth/sign-in");
     } catch (error) {
       setLoading(false);
       setMessage(error instanceof Error ? error.message : "Google sign in failed.");
@@ -36,31 +32,18 @@ function SignInCard() {
   }
 
   return (
-    <section className="app-card mx-auto max-w-md p-5 md:p-6">
-      <h2 className="text-lg font-semibold">Admin sign in</h2>
-      <p className="subtle mt-2 text-sm">Use Google to sign in. Access still requires admin profile roles.</p>
-      <a
-        href="/auth/sign-in"
-        className="btn btn-primary mt-4 w-full inline-block text-center"
-        onClick={() => {
-          try {
-            const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-            const origin = siteUrl
-              ? siteUrl.startsWith("http://") || siteUrl.startsWith("https://")
-                ? siteUrl
-                : `https://${siteUrl}`
-              : window.location.origin;
-            const signInUrl = new URL("/auth/sign-in", origin).toString();
-            // helpful debug info if navigation doesn't happen
-            // eslint-disable-next-line no-console
-            console.log("Navigating to sign-in:", signInUrl);
-          } catch (e) {
-            // ignore
-          }
-        }}
-      >
-        Continue with Google
-      </a>
+    <section className="app-card mx-auto max-w-md p-6 md:p-8">
+      <p className="subtle text-xs font-medium uppercase tracking-[0.25em]">Admin access</p>
+      <h2 className="mt-3 text-2xl font-semibold tracking-tight">Sign in</h2>
+      <p className="subtle mt-2 text-sm leading-6">Use Google to sign in. Access still requires admin profile roles.</p>
+      <button className="btn btn-primary mt-6 w-full" type="button" onClick={() => void signInWithGoogle()} disabled={loading}>
+        {loading ? "Redirecting to Google..." : "Continue with Google"}
+      </button>
+      <noscript>
+        <p className="subtle mt-3 text-sm">
+          JavaScript is disabled. Use <a className="underline" href="/auth/sign-in">/auth/sign-in</a> to continue.
+        </p>
+      </noscript>
       {message ? <p className="mt-3 text-sm text-red-500">{message}</p> : null}
     </section>
   );

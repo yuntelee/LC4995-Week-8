@@ -30,8 +30,8 @@ export function AppClient() {
   const title = useMemo(() => "HumorFlavor Manager", []);
 
   return (
-    <main className="mx-auto w-full max-w-7xl px-4 py-6 md:px-8 md:py-8">
-      <header className="mb-6 flex flex-col gap-4 md:mb-8 md:flex-row md:items-center md:justify-between">
+    <main className="mx-auto w-full max-w-7xl px-4 py-8 md:px-8 md:py-12">
+      <header className="app-card mb-6 flex flex-col gap-4 p-5 md:mb-8 md:flex-row md:items-center md:justify-between md:p-6">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">{title}</h1>
           <p className="subtle mt-2 text-sm md:text-base">

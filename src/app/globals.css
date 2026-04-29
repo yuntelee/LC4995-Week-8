@@ -92,7 +92,7 @@ select {
 .app-card {
   border: 1px solid var(--line);
   background: var(--surface);
-  border-radius: 12px;
+  border-radius: 16px;
 }
 
 .input {
@@ -100,27 +100,53 @@ select {
   border: 1px solid var(--line);
   background: var(--surface-muted);
   color: var(--text);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 0.6rem 0.75rem;
+}
+
+.input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand) 55%, transparent);
+  outline-offset: 2px;
+  border-color: color-mix(in srgb, var(--brand) 55%, var(--line));
 }
 
 .btn {
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.45rem 0.7rem;
+  border-radius: 10px;
+  padding: 0.55rem 0.85rem;
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease, transform 60ms ease;
 }
 
 .btn:hover {
   background: var(--surface-muted);
 }
 
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+  transform: none;
+}
+
+.btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--brand) 55%, transparent);
+  outline-offset: 2px;
+}
+
 .btn-primary {
   border-color: var(--brand);
   background: var(--brand);
   color: var(--brand-contrast);
+}
+
+.btn-primary:hover {
+  background: color-mix(in srgb, var(--brand) 92%, var(--brand-contrast));
 }
 
 .btn-danger {

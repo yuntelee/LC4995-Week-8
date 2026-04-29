@@ -39,9 +39,28 @@ function SignInCard() {
     <section className="app-card mx-auto max-w-md p-5 md:p-6">
       <h2 className="text-lg font-semibold">Admin sign in</h2>
       <p className="subtle mt-2 text-sm">Use Google to sign in. Access still requires admin profile roles.</p>
-      <button className="btn btn-primary mt-4 w-full" type="button" onClick={() => void signInWithGoogle()} disabled={loading}>
-        {loading ? "Redirecting to Google..." : "Continue with Google"}
-      </button>
+      <a
+        href="/auth/sign-in"
+        className="btn btn-primary mt-4 w-full inline-block text-center"
+        onClick={() => {
+          try {
+            const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+            const origin = siteUrl
+              ? siteUrl.startsWith("http://") || siteUrl.startsWith("https://")
+                ? siteUrl
+                : `https://${siteUrl}`
+              : window.location.origin;
+            const signInUrl = new URL("/auth/sign-in", origin).toString();
+            // helpful debug info if navigation doesn't happen
+            // eslint-disable-next-line no-console
+            console.log("Navigating to sign-in:", signInUrl);
+          } catch (e) {
+            // ignore
+          }
+        }}
+      >
+        Continue with Google
+      </a>
       {message ? <p className="mt-3 text-sm text-red-500">{message}</p> : null}
     </section>
   );

@@ -19,8 +19,6 @@ function SignInCard() {
     setMessage(null);
 
     try {
-      const supabase = getBrowserSupabaseClient();
-
       const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
       const origin = siteUrl
         ? siteUrl.startsWith("http://") || siteUrl.startsWith("https://")
@@ -28,27 +26,9 @@ function SignInCard() {
           : `https://${siteUrl}`
         : window.location.origin;
 
-      const redirectTo = new URL("/auth/callback", origin).toString();
-
-      const { data, error } = await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: {
-          redirectTo,
-          skipBrowserRedirect: true,
-          queryParams: {
-            access_type: "offline",
-            prompt: "consent",
-          },
-        },
-      });
-
-      if (error || !data?.url) {
-        setLoading(false);
-        setMessage(error?.message ?? "Unable to start Google sign-in. Please try again.");
-        return;
-      }
-
-      window.location.assign(data.url);
+      // Navigate to the server-side sign-in route which will redirect to Supabase.
+      const signInUrl = new URL("/auth/sign-in", origin).toString();
+      window.location.assign(signInUrl);
     } catch (error) {
       setLoading(false);
       setMessage(error instanceof Error ? error.message : "Google sign in failed.");

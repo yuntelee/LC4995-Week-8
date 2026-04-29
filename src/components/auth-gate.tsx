@@ -20,22 +20,38 @@ function SignInCard() {
 
     try {
       const supabase = getBrowserSupabaseClient();
-      const redirectTo = window.location.origin;
-      const { error } = await supabase.auth.signInWithOAuth({
+
+      const siteUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+      const origin = siteUrl
+        ? siteUrl.startsWith("http://") || siteUrl.startsWith("https://")
+          ? siteUrl
+          : `https://${siteUrl}`
+        : window.location.origin;
+
+      const redirectTo = new URL("/auth/callback", origin).toString();
+
+      const { data, error } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
           redirectTo,
+          skipBrowserRedirect: true,
+          queryParams: {
+            access_type: "offline",
+            prompt: "consent",
+          },
         },
       });
 
-      if (error) {
-        setMessage(error.message);
+      if (error || !data?.url) {
+        setLoading(false);
+        setMessage(error?.message ?? "Unable to start Google sign-in. Please try again.");
         return;
       }
+
+      window.location.assign(data.url);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Google sign in failed.");
-    } finally {
       setLoading(false);
+      setMessage(error instanceof Error ? error.message : "Google sign in failed.");
     }
   }
 
